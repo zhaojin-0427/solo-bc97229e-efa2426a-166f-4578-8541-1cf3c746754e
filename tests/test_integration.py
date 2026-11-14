@@ -1,9 +1,8 @@
 """端到端集成测试：导入、确认/撤销、并发、重启恢复、快照下载。
 
 每个用例通过环境变量指向独立数据目录；worker 模块在会话内只加载一次，
-用例间通过 stop/start 与重置停止事件实现干净启停。
+用例间通过 stop/join 与重置单例实现干净启停。
 """
-import os
 import threading
 import time
 
@@ -24,14 +23,17 @@ def app_ctx(tmp_path):
 
     # 直接替换配置值（同一进程内串行执行，用例结束后恢复）
     import app.config as config
-    saved = (config.DATA_DIR, config.DB_PATH, config.UPLOAD_DIR)
+    saved = (config.DATA_DIR, config.DB_PATH, config.UPLOAD_DIR,
+             config.LEADER_LOCK_PATH, config.SYNC_DIR)
     config.DATA_DIR = str(data_dir)
     config.DB_PATH = str(db_path)
     config.UPLOAD_DIR = str(upload_dir)
+    # 每个用例独立的领导锁文件，杜绝不同用例线程间的锁竞争
+    config.LEADER_LOCK_PATH = str(data_dir / "worker.lock")
+    config.SYNC_DIR = None
 
     # 重置 worker 单例状态，保证本用例启动的线程执行恢复逻辑
-    worker._stop.clear()
-    worker._started = False
+    worker.reset_for_tests()
     db.init_db()
     worker.start_worker()
 
@@ -45,9 +47,12 @@ def app_ctx(tmp_path):
     }
     yield ctx
 
+    # 先置停止位再 join，确保旧线程不会存活到下一个用例、读到新库路径
     worker.stop_worker()
-    time.sleep(0.25)
-    config.DATA_DIR, config.DB_PATH, config.UPLOAD_DIR = saved
+    assert worker.join_worker(timeout=10), "后台 worker 线程未能及时退出"
+    worker.reset_for_tests()
+    (config.DATA_DIR, config.DB_PATH, config.UPLOAD_DIR,
+     config.LEADER_LOCK_PATH, config.SYNC_DIR) = saved
 
 
 def _wait_jobs(ctx, timeout=10, expect_failed_ok=True):
@@ -237,11 +242,13 @@ def test_late_compute_does_not_restore_old_groups(app_ctx):
     assert len(groups_before) == 2
 
     # 手工插入一个 seq_cutoff 已过期的重算任务并直接置为 RUNNING，
-    # 模拟计算期间关系发生变化的"迟到计算"
+    # 模拟计算期间关系发生变化的"迟到计算"；worker_id 绑定当前线程，
+    # 因此后台循环不会重复认领它，由测试直接驱动其执行逻辑
     def insert_stale(conn):
         conn.execute(
-            "INSERT INTO jobs(kind, status, seq_cutoff, started_at) "
-            "VALUES ('RECOMPUTE','RUNNING', -1, datetime('now'))"
+            "INSERT INTO jobs(kind, status, seq_cutoff, worker_id, started_at) "
+            "VALUES ('RECOMPUTE','RUNNING', -1, ?, datetime('now'))",
+            (ctx["worker"]._worker_id,),
         )
 
     ctx["db"].write_tx(insert_stale)
@@ -253,7 +260,7 @@ def test_late_compute_does_not_restore_old_groups(app_ctx):
         stale = conn.execute(
             "SELECT * FROM jobs WHERE kind='RECOMPUTE' AND seq_cutoff=-1"
         ).fetchone()
-    ctx["worker"].run_recompute(stale)
+    ctx["worker"].run_recompute(stale, ctx["worker"]._worker_id)
     _wait_jobs(ctx)
 
     # 最终分组必须反映最新关系（三人同组），旧的两人组从未被发布
@@ -328,20 +335,23 @@ def test_restart_marks_unfinished_failed_but_keeps_committed(app_ctx):
     ctx["services"].confirm_relation(a, b)
     _wait_jobs(ctx)
 
-    # 制造一个卡住的 PENDING
-    def add_pending(conn):
+    # 制造一个卡住的 RUNNING（前任退出时遗留）与一个排队中的 PENDING
+    def add_jobs(conn):
+        conn.execute(
+            "INSERT INTO jobs(kind, status, seq_cutoff, worker_id, started_at) "
+            "VALUES ('RECOMPUTE','RUNNING', 0, 'ghost-worker', datetime('now'))"
+        )
         conn.execute(
             "INSERT INTO jobs(kind, status, seq_cutoff) "
             "VALUES ('RECOMPUTE','PENDING', 0)"
         )
 
-    ctx["db"].write_tx(add_pending)
+    ctx["db"].write_tx(add_jobs)
 
-    # 模拟重启：新 worker 启动时执行恢复（先停旧线程再重置单例）
+    # 模拟重启：新 worker 启动时执行恢复（先停旧线程并回收再重置单例）
     worker.stop_worker()
-    time.sleep(0.3)
-    worker._stop.clear()
-    worker._started = False
+    assert worker.join_worker(timeout=10)
+    worker.reset_for_tests()
     worker.start_worker()
     _wait_jobs(ctx)
 
@@ -349,7 +359,37 @@ def test_restart_marks_unfinished_failed_but_keeps_committed(app_ctx):
     groups = ctx["repository"].list_groups()
     assert len(groups) == 1
     failed = ctx["repository"].failed_jobs()
-    assert any("重启" in f["detail"] for f in failed)
+    assert any("退出" in f["detail"] for f in failed)
+
+    # PENDING 排队任务不丢失：被新 worker 接手执行完毕，不会被误标失败
+    with ctx["db"].Snapshot() as conn:
+        pending_left = conn.execute(
+            "SELECT COUNT(*) AS c FROM jobs WHERE status='PENDING'"
+        ).fetchone()["c"]
+        assert pending_left == 0
+        ghost = conn.execute(
+            "SELECT status FROM jobs WHERE worker_id='ghost-worker'"
+        ).fetchone()
+        assert ghost["status"] == "FAILED"
+
+
+def test_stale_worker_cannot_write_terminal_or_newer_job(app_ctx):
+    """围栏：失去所有权的旧 worker_id 无法回写任务或覆盖新结果。"""
+    ctx = app_ctx
+    job_id, _total, _errors = _import(
+        ctx, "hospital,mrn\nH01,A1\nH02,B1\n")
+    with ctx["db"].Snapshot() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        assert row["status"] == "DONE"
+
+    # 旧 worker_id 尝试把已终结任务改成 FAILED：条件不匹配，零行生效
+    assert ctx["worker"]._fail(job_id, "stale-old-worker", "迟到失败") is False
+    with ctx["db"].Snapshot() as conn:
+        again = conn.execute(
+            "SELECT status, detail FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        assert again["status"] == "DONE"
+        assert "迟到失败" not in (again["detail"] or "")
 
 
 def test_web_endpoints_and_csv_upload(app_ctx):

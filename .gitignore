@@ -6,3 +6,5 @@ data/
 *.db
 *.db-wal
 *.db-shm
+tests/_pylibs/
+worker.lock

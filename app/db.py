@@ -59,12 +59,22 @@ CREATE TABLE IF NOT EXISTS jobs (
     detail      TEXT NOT NULL DEFAULT '',   -- 拒绝原因/失败原因等
     seq_cutoff  INTEGER,                    -- RECOMPUTE 任务基于的关系序列号
     file_path   TEXT,                       -- IMPORT 任务的落盘文件（重启后仍可访问）
+    worker_id   TEXT,                       -- 当前/最后持有该任务的后台进程
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     started_at  TEXT,
     finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 """
+
+# 早期版本的 jobs 表没有 worker_id 列；对既有库做幂等增补，
+# 列一旦存在即跳过，保证升级不丢数据。
+_MIGRATIONS = (
+    (
+        "jobs", "worker_id",
+        "ALTER TABLE jobs ADD COLUMN worker_id TEXT",
+    ),
+)
 
 
 def connect(db_path=None):
@@ -88,8 +98,17 @@ def init_db():
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
+        _apply_migrations(conn)
     finally:
         conn.close()
+
+
+def _apply_migrations(conn):
+    for table, column, ddl in _MIGRATIONS:
+        cols = {r["name"] for r in conn.execute(
+            f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(ddl)
 
 
 def write_tx(fn, retries=config.WRITE_RETRY):

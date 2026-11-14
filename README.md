@@ -56,7 +56,10 @@ CSV 格式：表头必须包含医院列（`hospital`/`医院`）与院内编号
 | 关系、组成员、组号一起生效；迟到计算不恢复旧分组 | 发布在单事务内整体替换 `groups`；任务带关系序列号 `seq_cutoff`，计算/发布前比对最新序列，过期即作废并补排最新任务 |
 | 每次查询或下载来自一个完整状态 | 所有读操作在单个只读快照事务内完成；下载带 `compute_id` 版本标识 |
 | 失败不改正式分组 | 冲突/过期只更新任务状态，不触碰 `groups` |
-| 重启保留成功变动，未完成操作标失败 | WAL 持久化；worker 启动时把所有 PENDING/RUNNING 任务置 FAILED 并注明"服务重启" |
+| 重启保留成功变动，未完成操作标失败 | WAL 持久化；新后台领导当选时把前任遗留在 RUNNING 的任务标 FAILED 并注明"后台进程退出"，PENDING 排队任务保留并继续执行 |
+| 平滑重载期间全局只执行一个导入/重算 | 数据目录内 `worker.lock` 进程级排他咨询锁（`fcntl.flock`）：仅持锁进程的后台线程认领任务；非领导进程只提供 Web 能力 |
+| 存活（含暂停）旧进程不被误报失败、不重复执行 | 锁绑定持锁进程生命周期，SIGSTOP 不释放锁；任务认领登记 `worker_id`，所有回写带 `worker_id + status='RUNNING'` 所有权围栏 |
+| 新 worker 不等旧任务结束即可服务 | Web 路由不依赖领导锁；未获锁进程的上传/核对/进度/下载立即可用，任务由持锁进程统一执行 |
 | 页面可查进度、成员、拒绝原因，下载对照 CSV | 三个页面 + 任务进度条 + 失败原因区 + `/download/mapping.csv` |
 
 ## 四、架构说明
@@ -64,17 +67,46 @@ CSV 格式：表头必须包含医院列（`hospital`/`医院`）与院内编号
 ```
 app/
 ├── config.py       # 路径与轮询配置（环境变量可覆盖）
-├── db.py           # 连接/Schema、WAL、IMMEDIATE 写事务、只读快照
+├── db.py           # 连接/Schema、WAL、IMMEDIATE 写事务、只读快照、幂等迁移
+├── leader.py       # 跨进程后台领导锁（fcntl.flock，worker.lock）
 ├── groups.py       # 并查集、连通分量、同医院冲突检测（纯函数）
 ├── services.py     # 导入入队、CSV 解析、确认/撤销的完整关系判定
-├── worker.py       # 后台线程：导入逐行入库、重算、原子发布、重启恢复
+├── worker.py       # 后台线程：领导竞选、导入逐行入库、重算、原子发布、退出交接
 ├── repository.py   # 只读查询：统计/进度/成员/失败原因/对照 CSV
 ├── web.py          # Flask 路由
 ├── templates/      # 三个页面（导入与进度 / 核对关系 / 分组与下载）
 └── static/         # 示例 CSV
-tests/              # 14 个测试：算法纯函数 + 端到端 + 并发 + 重启恢复
+tests/
+├── test_groups.py            # 算法纯函数
+├── test_integration.py       # 进程内端到端、并发、围栏与重启恢复
+├── test_process_handoff.py   # 独立操作系统进程：启动重叠、暂停恢复、退出交接
+├── process_harness.py        # 上者使用的子进程引导脚本
+└── _pylibs/                  # 独立进程测试的依赖目录（本地生成，已 gitignore）
 demo/               # 演示用 CSV
 ```
+
+### 平滑重载与后台交接
+
+Gunicorn 单 worker 平滑重载（SIGHUP、`--max-requests` 滚动重启）期间，
+新旧进程会并存并共用同一数据目录。本系统用 **进程级领导锁 + 任务所有权
+围栏** 保证交接正确：
+
+1. 每个进程启动后台线程时先竞争数据目录内的 `worker.lock` 排他咨询锁。
+   锁与持锁进程生命周期绑定：正常退出随描述符关闭释放，崩溃/被 KILL
+   由内核自动释放；被 SIGSTOP 暂时暂停时锁不释放，不会误触发交接。
+2. 只有持锁进程（leader）认领并执行任务，全局任一时刻只有一个导入或
+   重算在跑；未获锁进程不接触任务队列，但其上传、核对、进度查询与完整
+   对照下载立即可用，无需等待旧任务结束。
+3. 任务认领即写入本进程的 `worker_id`；之后进度、失败、发布、完成等
+   所有回写都带 `worker_id + status='RUNNING'` 条件，旧进程无法回写
+   已终结任务，也无法覆盖新进程发布的分组（发布版本号 `compute_id`
+   单调递增）。
+4. 新 leader 当选说明前任已退出：仅把前任遗留在 RUNNING 的任务标
+   FAILED（已逐行提交的患者、已发布分组随 WAL 保留），PENDING 排队
+   任务原样保留并由新 leader 接着执行，重载不丢队列。
+
+> 部署约束：不要给 Gunicorn 加 `--preload`，否则锁文件描述符会在
+> fork 时被复制，破坏"每进程独立竞选"的语义。
 
 ### 并发与一致性模型
 
@@ -92,17 +124,38 @@ demo/               # 演示用 CSV
 ## 五、测试
 
 ```bash
+pip install -r app/requirements.txt pytest
 python3 -m pytest tests/ -v
 ```
 
 覆盖：递增编号与同键复用、传递成组与最小组号、撤销拆组/替代路径保留、
 同医院冲突检测、并发确认只成功一次且无关确认保留、幂等重复确认、
-迟到计算作废、计算失败不覆盖正式分组、重启恢复、HTTP 上传与快照下载。
+迟到计算作废、计算失败不覆盖正式分组、所有权围栏（旧 worker 无法回写
+已终结任务）、重启恢复、HTTP 上传与快照下载。
+
+独立进程交接测试（`tests/test_process_handoff.py`）以 `python -I`
+拉起真实操作系统进程，用文件门控精确控制启动重叠、SIGSTOP/SIGCONT
+暂停恢复与进程退出交接。子进程在隔离模式下不读取 `PYTHONPATH` 与用户
+site-packages，需先把依赖装入仓库内的测试目录：
+
+```bash
+pip install --target tests/_pylibs -r app/requirements.txt pytest
+python3 -m pytest tests/test_process_handoff.py -v
+```
+
+四个场景：① 启动重叠时存活任务不被误报失败、不被重复执行，新进程
+Web 立即可用；② 暂停的持锁进程不被备用进程接管，备用进程持续提供
+页面服务；③ 旧进程退出后 RUNNING 任务标失败、已提交患者与成功分组
+保留、PENDING 不丢失并被接手；④ 备用进程完整支持上传、核对、进度与
+带 `X-Compute-Id` 的对照下载。
 
 ## 六、运维备注
 
-- 容器以单 gunicorn worker + 多线程运行（后台线程与 Web 同进程协作）；
-  数据存于命名卷 `patient_data`，`docker compose down` 不删数据，
-  `docker compose down -v` 才会清除。
+- 容器以单 gunicorn worker + 多线程运行（后台线程与 Web 同进程协作，
+  不使用 `--preload`）；数据存于命名卷 `patient_data`，
+  `docker compose down` 不删数据，`docker compose down -v` 才会清除。
 - 健康检查：`GET /healthz`。
 - 上传大小上限 32MB（`web.py` 可调）。
+- 领导锁文件位于数据目录内的 `worker.lock`（可用 `APP_LEADER_LOCK_PATH`
+  覆盖）；多个进程共用同一数据目录时，只有一个进程的后台线程执行任务，
+  其余进程保持 Web 可用并等待接管。
