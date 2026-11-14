@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <h2>确认 / 撤销 同人关系</h2>
+  <p class="muted">
+    输入两条患者记录号。确认按<b>提交时的完整关系</b>判定：若合并后同组内
+    同一医院出现不同院内编号则拒绝；并发下两次单独合法、合并违规的确认只有一次成功。
+    撤销按剩余关系重新拆组，仍有其他路径相连则不会拆开。
+  </p>
+  <form class="inline" method="post" action="{{ url_for('confirm') }}">
+    记录号 A <input type="number" name="record_a" min="1" required>
+    记录号 B <input type="number" name="record_b" min="1" required>
+    <button type="submit">确认同人</button>
+    <button class="danger" formaction="{{ url_for('revoke') }}">撤销关系</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>患者记录（含当前组号）</h2>
+  <form class="inline" method="get" style="margin-bottom:10px">
+    <input type="search" name="q" value="{{ q }}"
+           placeholder="按医院 / 院内编号 / 记录号搜索">
+    <button class="gray" type="submit">搜索</button>
+  </form>
+  <table>
+    <thead><tr>
+      <th>记录号</th><th>医院</th><th>院内编号</th><th>当前组号</th>
+    </tr></thead>
+    <tbody>
+    {% for p in patients %}
+      <tr>
+        <td>{{ p.id }}</td>
+        <td>{{ p.hospital }}</td>
+        <td>{{ p.hospital_mrn }}</td>
+        <td>{{ p.group_no if p.group_no is not none else '计算中/未发布' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">暂无记录，请先在首页导入 CSV。</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>关系流水（含已撤销）</h2>
+  <table>
+    <thead><tr>
+      <th>关系#</th><th>记录 A</th><th>记录 B</th><th>状态</th>
+      <th>确认时间</th><th>撤销时间</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rels %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.patient_a }}（{{ r.ha }} / {{ r.ma }}）</td>
+        <td>{{ r.patient_b }}（{{ r.hb }} / {{ r.mb }}）</td>
+        <td><span class="badge b-{{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.created_at }}</td>
+        <td>{{ r.revoked_at or '—' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="muted">暂无关系。</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if failed %}
+<div class="card">
+  <h2>拒绝 / 失败原因</h2>
+  <table>
+    <thead><tr><th>任务#</th><th>类型</th><th>原因</th><th>时间</th></tr></thead>
+    <tbody>
+    {% for f in failed %}
+      <tr>
+        <td>{{ f.id }}</td>
+        <td>{{ '导入' if f.kind=='IMPORT' else '分组计算' }}</td>
+        <td class="reason">{{ f.detail }}</td>
+        <td>{{ f.finished_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}

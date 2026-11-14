@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <h2>编号对照下载</h2>
+  <p class="muted">
+    每次下载都取自同一个完整分组状态（响应头 <code>X-Compute-Id</code> 标注版本）。
+    迟到的后台计算不会覆盖当前分组；计算失败时正式分组保持不变。
+  </p>
+  <a class="btn" href="{{ url_for('download') }}">下载编号对照 CSV</a>
+  {% if pending %}
+    <span class="muted" style="margin-left:12px">
+      有 {{ pending|length }} 个分组任务进行中，下载内容为当前已发布的完整状态。
+    </span>
+  {% endif %}
+</div>
+
+{% if groups is none %}
+  <div class="card"><p class="muted">
+    分组尚未发布。请先导入患者 CSV，后台将自动完成首次计算；
+    若当前关系存在同医院多编号冲突，请先在“核对关系”页撤销矛盾关系。
+  </p></div>
+{% else %}
+<div class="card">
+  <h2>分组成员（组号 = 组内最小记录号，共 {{ groups|length }} 组）</h2>
+  {% for g in groups %}
+  <div class="group-box">
+    <div class="gh">
+      <span>组号 {{ g.group_no }}</span>
+      <span class="muted">compute_id {{ g.compute_id }} · {{ g.members|length }} 名成员</span>
+    </div>
+    <table>
+      <thead><tr><th>记录号</th><th>医院</th><th>院内编号</th></tr></thead>
+      <tbody>
+      {% for m in g.members %}
+        <tr><td>{{ m.patient_id }}</td><td>{{ m.hospital }}</td>
+            <td>{{ m.hospital_mrn }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if failed %}
+<div class="card">
+  <h2>拒绝 / 失败原因</h2>
+  <table>
+    <thead><tr><th>任务#</th><th>类型</th><th>原因</th><th>时间</th></tr></thead>
+    <tbody>
+    {% for f in failed %}
+      <tr>
+        <td>{{ f.id }}</td>
+        <td>{{ '导入' if f.kind=='IMPORT' else '分组计算' }}</td>
+        <td class="reason">{{ f.detail }}</td>
+        <td>{{ f.finished_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}

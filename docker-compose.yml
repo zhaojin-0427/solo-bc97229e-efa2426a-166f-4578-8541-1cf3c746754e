@@ -1,0 +1,22 @@
+services:
+  patient-mapping:
+    build: .
+    image: patient-mapping:latest
+    container_name: patient-mapping
+    ports:
+      - "8000:8000"
+    volumes:
+      - patient_data:/data
+    environment:
+      APP_DATA_DIR: /data
+      APP_DB_PATH: /data/patients.db
+      APP_UPLOAD_DIR: /data/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  patient_data:

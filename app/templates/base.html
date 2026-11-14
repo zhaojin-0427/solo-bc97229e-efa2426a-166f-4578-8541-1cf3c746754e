@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>多中心患者编号对照</title>
+{% block head %}{% endblock %}
+<style>
+  :root { --line:#d9dee7; --blue:#2563eb; --red:#dc2626; --green:#15803d; --bg:#f6f8fb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         background:var(--bg); color:#1f2937; }
+  header { background:#0f172a; color:#fff; padding:14px 28px; display:flex;
+           align-items:center; gap:24px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  nav a { color:#cbd5e1; text-decoration:none; margin-right:18px; font-size:14px; }
+  nav a:hover { color:#fff; }
+  main { max-width:1180px; margin:24px auto; padding:0 20px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px;
+          padding:18px 20px; margin-bottom:20px; }
+  .card h2 { margin:0 0 12px; font-size:16px; }
+  .stats { display:flex; gap:14px; flex-wrap:wrap; }
+  .stat { background:#f1f5f9; border-radius:8px; padding:10px 16px; min-width:120px; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { font-size:12px; color:#64748b; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { border:1px solid var(--line); padding:7px 9px; text-align:left; }
+  th { background:#f8fafc; font-weight:600; }
+  tr:nth-child(even) td { background:#fcfdff; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }
+  .b-PENDING { background:#fef9c3; color:#854d0e; }
+  .b-RUNNING { background:#dbeafe; color:#1e40af; }
+  .b-DONE { background:#dcfce7; color:var(--green); }
+  .b-FAILED { background:#fee2e2; color:var(--red); }
+  .b-ACTIVE { background:#dcfce7; color:var(--green); }
+  .b-REVOKED { background:#f1f5f9; color:#64748b; }
+  .flash { padding:10px 14px; border-radius:8px; margin-bottom:14px; font-size:14px; }
+  .flash.error { background:#fee2e2; color:#991b1b; border:1px solid #fecaca; }
+  .flash.info { background:#e0f2fe; color:#075985; border:1px solid #bae6fd; }
+  form.inline { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  input[type=number], input[type=search], input[type=text] {
+    padding:7px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
+  button, .btn { background:var(--blue); color:#fff; border:0; border-radius:6px;
+    padding:8px 16px; font-size:14px; cursor:pointer; text-decoration:none; display:inline-block; }
+  button.danger { background:var(--red); }
+  button.gray { background:#475569; }
+  .muted { color:#64748b; font-size:12px; }
+  .reason { color:var(--red); font-size:12px; word-break:break-all; }
+  .group-box { border:1px solid var(--line); border-radius:8px; margin-bottom:10px;
+    overflow:hidden; }
+  .group-box .gh { background:#f1f5f9; padding:8px 12px; font-weight:600; font-size:13px;
+    display:flex; justify-content:space-between; }
+  .group-box table { border:0; }
+  .group-box th, .group-box td { border-color:#eef2f7; }
+  .progress-bar { background:#e2e8f0; border-radius:999px; height:8px; width:160px;
+    overflow:hidden; display:inline-block; vertical-align:middle; }
+  .progress-bar i { display:block; height:100%; background:var(--blue); }
+  code { background:#f1f5f9; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>多中心患者编号对照系统</h1>
+  <nav>
+    <a href="{{ url_for('index') }}">导入与进度</a>
+    <a href="{{ url_for('relations_view') }}">核对关系</a>
+    <a href="{{ url_for('groups_view') }}">分组与下载</a>
+  </nav>
+</header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

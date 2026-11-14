@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block head %}
+{% if pending %}<meta http-equiv="refresh" content="2">{% endif %}
+{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>当前状态（同一完整快照）</h2>
+  <div class="stats">
+    <div class="stat"><b>{{ stats.patients }}</b><span>患者记录</span></div>
+    <div class="stat"><b>{{ stats.active_relations }}</b><span>有效同人关系</span></div>
+    <div class="stat"><b>{{ stats.revoked_relations }}</b><span>已撤销关系</span></div>
+    <div class="stat"><b>{{ stats.groups }}</b><span>已发布分组</span></div>
+    <div class="stat"><b>{{ stats.latest_compute }}</b><span>当前分组版本 compute_id</span></div>
+  </div>
+  {% if not stats.published %}
+  <p class="muted" style="margin-top:10px">
+    尚无已发布分组：首次导入完成后后台会自动计算，期间导入/核对/查询均可继续使用。
+  </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>上传患者 CSV</h2>
+  <p class="muted">
+    表头需包含 <code>hospital</code>（医院）与 <code>mrn</code>（院内编号）两列；
+    (医院, 院内编号) 组合唯一，重复上传自动复用既有记录号，不会重复入库。
+  </p>
+  <form class="inline" method="post" action="{{ url_for('import_csv') }}"
+        enctype="multipart/form-data">
+    <input type="file" name="file" accept=".csv,text/csv" required>
+    <button type="submit">上传并入队</button>
+    <a class="btn gray" href="{{ url_for('static', filename='sample_patients.csv') }}">
+      下载示例 CSV</a>
+  </form>
+</div>
+
+<div class="card">
+  <h2>任务进度</h2>
+  {% if jobs %}
+  <table>
+    <thead><tr>
+      <th>#</th><th>类型</th><th>状态</th><th>文件</th><th>进度</th>
+      <th>新增/复用/拒绝</th><th>说明与拒绝原因</th><th>创建时间</th>
+    </tr></thead>
+    <tbody>
+    {% for j in jobs %}
+      <tr>
+        <td>{{ j.id }}</td>
+        <td>{{ '导入' if j.kind=='IMPORT' else '分组计算' }}</td>
+        <td><span class="badge b-{{ j.status }}">{{ j.status }}</span></td>
+        <td>{{ j.filename or '—' }}</td>
+        <td>
+          {% if j.kind=='IMPORT' and j.total_rows %}
+            {% set pct = (j.done_rows * 100 // j.total_rows) %}
+            <span class="progress-bar"><i style="width:{{ pct }}%"></i></span>
+            {{ j.done_rows }}/{{ j.total_rows }}
+          {% elif j.seq_cutoff is not none %}
+            基于关系序列号 {{ j.seq_cutoff }}
+          {% else %}—{% endif %}
+        </td>
+        <td>{{ j.inserted }} / {{ j.reused }} / {{ j.rejected }}</td>
+        <td class="reason">{{ j.detail or '—' }}</td>
+        <td>{{ j.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">暂无任务。</p>{% endif %}
+</div>
+
+{% endblock %}
